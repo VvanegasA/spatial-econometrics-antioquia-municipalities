@@ -1,0 +1,5 @@
+metric,value
+Moran_I_mean,0.40928670012731133
+significant_years,10
+total_years,10
+recommended_model,SAR_ML

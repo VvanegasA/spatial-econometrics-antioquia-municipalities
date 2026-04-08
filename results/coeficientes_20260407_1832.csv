@@ -1,0 +1,6 @@
+modelo,variable,coef,std_err
+OLS_FE,tasa_homicidios,-0.00015,0.00031
+OLS_FE,cobertura_secundaria,0.00611,0.00085
+SAR,tasa_homicidios,-7e-05,0.00027
+SAR,cobertura_secundaria,0.00544,0.00075
+SAR,rho,0.38507,0.03689

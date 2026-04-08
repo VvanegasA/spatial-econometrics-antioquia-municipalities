@@ -1,0 +1,6 @@
+prueba,estadistico,pvalor
+Moran_I_residuos,-0.0452,0.24
+LM-Lag,23.7667,0.0
+LM-Error,126.8777,0.0
+RLM-Lag,4.2362,0.0396
+RLM-Error,0.0394,0.8427

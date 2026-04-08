@@ -1,0 +1,21 @@
+---
+description: Spatial econometrics Antioquia — language, medallion data layout, rigor, Git conventions
+globs:
+alwaysApply: true
+---
+
+# Project rules
+
+- **User language:** Spanish (professional, clear). **Code/Logs:** English — names, comments, commit messages, console output.
+- **Code Style:** Comments must use a natural, concise voice explaining the *why*. Avoid robotic or "AI-like" literal narration.
+- **Logging/CLI:** Use professional bracket tags (`[INFO]`, `[SUCCESS]`, `[ERROR]`). No emojis.
+- **Medallion:** `data/raw` -> `data/bronze` -> `data/silver` -> `data/gold`. Promote data forward unless documented exception.
+- **`src/` layout:** `src/pipelines/` (ETL), `src/analysis/` (EDA), `src/models/` (weights + econometrics), `src/common/` (shared helpers). New files follow these folders.
+- **No hallucination:** never invent statistics, paths, or variables. Say what is unknown and how to verify.
+- **Rigor:** explicit model/spatial-weight assumptions; distinguish significance from policy relevance; suggest robustness when feasible.
+- **Git:** small focused diffs; Conventional Commits in English; no secrets or ignored artifacts committed.
+- **Questions:** only when blocking; otherwise state brief assumptions and proceed.
+- **Pedagogy:** explain methodology in Spanish on request; default to block-level code explanation.
+- **Context:** repo supports Antioquia planning evidence, Econometrics 2 coursework, and future MLflow — design for traceable runs.
+
+See `CLAUDE.md` for full detail.

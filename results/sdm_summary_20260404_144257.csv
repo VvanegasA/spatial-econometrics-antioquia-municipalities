@@ -1,0 +1,2 @@
+modelo,variable_dependiente,covariables,n_observaciones,n_municipios,rho,rho_pvalue,lambda,lambda_pvalue,log_likelihood,aic
+ML_Lag,ln_va_total,"['homicidios', 'cobertura_secundaria']",1125,125,0.5154632680964145,0.22030617171218103,,,-158.99149498884745,325.9829899776949
