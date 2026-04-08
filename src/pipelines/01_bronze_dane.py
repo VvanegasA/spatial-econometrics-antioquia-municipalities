@@ -1,64 +1,61 @@
-# =============================================================
-# BRONZE — Valor Agregado Municipal DANE 2015-2024
-# Carga cruda del Excel original sin transformar
-# =============================================================
+# Bronze Layer: Municipal Value Added — DANE (2015-2024)
+# Loads the raw Excel file as-is; no transformations here.
+# Run from repo root: python src/pipelines/01_bronze_dane.py
 
-import pandas as pd
 import os
 import logging
 from datetime import datetime
 from pathlib import Path
 
+import pandas as pd
+
 os.chdir(Path(__file__).resolve().parents[2])
 os.makedirs("logs", exist_ok=True)
+
 logging.basicConfig(
     filename=f"logs/01_bronze_{datetime.today().strftime('%Y%m%d')}.log",
     level=logging.INFO,
-    format="%(asctime)s — %(levelname)s — %(message)s"
+    format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
 RAW_PATH    = os.path.join("data", "raw", "PIB-VA_Mpal_2015-2024pr_Publ_02-09-2025_v2.xlsm")
 BRONZE_PATH = os.path.join("data", "bronze")
 os.makedirs(BRONZE_PATH, exist_ok=True)
 
-# --- verificar archivo ---
 if not os.path.exists(RAW_PATH):
-    raise FileNotFoundError(f"❌ Archivo no encontrado: {RAW_PATH}\n   Ponlo en data/raw/")
+    raise FileNotFoundError(f"[ERROR] File not found: {RAW_PATH}\n  Place it under data/raw/")
 
-print(f"✅ Archivo encontrado: {RAW_PATH}")
+print(f"[INFO] Loading: {RAW_PATH}")
 
-# --- cargar hoja principal (fila 4 = encabezados, datos desde fila 5) ---
+# Row 4 in Excel is the header (index 3 in Python)
 df = pd.read_excel(
     RAW_PATH,
     sheet_name="PIB Mpal 2015-2024 Cons",
-    header=3,          # fila 4 en Excel = índice 3 en Python
+    header=3,
     engine="openpyxl"
 )
-print(f"✅ Shape cargado: {df.shape}")
-print("\n📌 Columnas detectadas:")
+print(f"[INFO] Value Added sheet — shape: {df.shape}")
+print("\n[INFO] Detected columns:")
 for i, col in enumerate(df.columns):
     print(f"   [{i}] {col}")
-print("\n📌 Primeras 3 filas:")
+print("\n[INFO] First 3 rows:")
 print(df.head(3).to_string())
 
-# --- guardar bronze ---
 df.to_parquet(os.path.join(BRONZE_PATH, "dane_bronze.parquet"), index=False)
 df.to_csv(os.path.join(BRONZE_PATH, "dane_bronze.csv"), index=False, encoding="utf-8-sig")
 
-# --- cargar hoja poblacion ---
-# El header exacto es la fila 3 (index 2) que contiene DPMP, Municipio, y los años
+# Population tab — header is on row 3 (index 2)
 df_pob = pd.read_excel(
     RAW_PATH,
     sheet_name="POBLACION",
-    header=2,          
+    header=2,
     engine="openpyxl"
 )
-print(f"✅ Shape Población cargado: {df_pob.shape}")
+print(f"\n[INFO] Population sheet — shape: {df_pob.shape}")
 
-# --- guardar bronze de poblacion ---
 df_pob.to_parquet(os.path.join(BRONZE_PATH, "poblacion_bronze.parquet"), index=False)
 df_pob.to_csv(os.path.join(BRONZE_PATH, "poblacion_bronze.csv"), index=False, encoding="utf-8-sig")
 
-logging.info(f"Bronze VA guardado: {df.shape}")
-logging.info(f"Bronze Poblacion guardado: {df_pob.shape}")
-print("\n✅ BRONZE COMPLETADO")
+logging.info(f"Bronze VA saved: {df.shape}")
+logging.info(f"Bronze Population saved: {df_pob.shape}")
+print("\n[SUCCESS] Bronze DANE completed.")

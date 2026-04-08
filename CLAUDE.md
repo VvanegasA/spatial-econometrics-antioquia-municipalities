@@ -7,7 +7,9 @@ This file orients assistants (Claude, Cursor, etc.) when working in this reposit
 ## Communication
 
 - **With the repository owner:** use **Spanish** — clear, professional, and pedagogical when they ask for explanations.
-- **Code:** identifiers, file names, docstrings (if any), **commit messages**, and brief inline comments — **English**.
+- **Code:** identifiers, file names, docstrings (if any), **commit messages**, and inline comments — **English**.
+- **Comment style:** use a natural, direct, and concise voice. Focus on *why* the code does something rather than over-explaining *what* it does. Avoid overly robotic or "AI-like" literal language.
+- **Logging and outputs:** do not use exploratory emojis (✅, ❌, etc.). Use standard professional CLI tags (`[INFO]`, `[SUCCESS]`, `[WARNING]`, `[ERROR]`).
 - **Learning goal:** the owner is building econometrics expertise. Explain **methodology, assumptions, and interpretation** in Spanish; keep the codebase readable without long Spanish comments inside source files.
 
 ---

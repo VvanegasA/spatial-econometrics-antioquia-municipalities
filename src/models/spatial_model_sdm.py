@@ -1,42 +1,43 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-================================================================================
-ECONOMETRÍA ESPACIAL DE PANEL — Antioquia 2015-2024
-================================================================================
+Spatial Panel Econometrics — Antioquia Municipalities (2015-2023)
+=================================================================
 
-Secuencia metodológica correcta:
+Estimation workflow (Anselin 1988; Elhorst 2014):
 
-  1. Panel OLS con efectos fijos municipales (within-estimator)
-  2. Moran's I sobre residuos del OLS (con W Queen real del shapefile)
-  3. Tests LM de panel espacial (Anselin 1988; Elhorst 2014):
-       - LM-Lag     → implica modelo SAR
-       - LM-Error   → implica modelo SEM
-       - RLM-Lag    → versión robusta (controla por Error)
-       - RLM-Error  → versión robusta (controla por Lag)
-  4. Regla de decisión:
-       - Si RLM-Lag > RLM-Error y significativo → estimar Panel_FE_Lag  (SAR con FE)
-       - Si RLM-Error > RLM-Lag y significativo → estimar Panel_FE_Error (SEM con FE)
-       - Si ambos no significativos → quedar con Panel OLS FE (sin componente espacial)
-  5. Efectos directos, indirectos y totales (LeSage & Pace 2009)
+  1. Panel OLS with municipal fixed effects (within-estimator)
+  2. Moran's I on OLS residuals — checks if spatial dependence persists
+     after controlling for time-invariant heterogeneity
+  3. Lagrange Multiplier diagnostics on the panel:
+       LM-Lag    -> tests for SAR structure (rho != 0)
+       LM-Error  -> tests for SEM structure (lambda != 0)
+       RLM-Lag   -> robust version (controls for error dependence)
+       RLM-Error -> robust version (controls for lag dependence)
+  4. Model selection rule (robust LM statistics take priority):
+       RLM-Lag sig, RLM-Error not   -> Panel SAR  (Panel_FE_Lag)
+       RLM-Error sig, RLM-Lag not   -> Panel SEM  (Panel_FE_Error)
+       Both significant              -> pick the one with larger statistic
+       Neither significant           -> keep Panel OLS FE
+  5. Direct, indirect, and total effects (LeSage & Pace 2009)
 
-Variable dependiente:  ln_va_per_capita  (log VA per cápita, precios constantes)
-Covariables:
-  - tasa_homicidios       (homicidios por 100,000 hab — proxy de inseguridad)
-  - cobertura_secundaria  (cobertura neta secundaria — proxy de capital humano)
+Dependent variable : ln_va_per_capita  (log VA per capita, constant prices)
+Regressors         :
+  - tasa_homicidios      (homicides per 100k — security proxy)
+  - cobertura_secundaria (net secondary coverage — human capital proxy)
 
-Referencia W: data/gold/W_queen.pkl  (Queen contiguity, EPSG:3116, row-standardized)
+W reference: data/gold/W_queen.pkl  (Queen contiguity, row-standardized)
 
-Nota sobre panel: cobertura_secundaria no disponible en 2024 (rezago SIMAT).
-El modelo trabaja con 2015-2023 (9 años, 125 municipios, N×T = 1,125 obs).
-================================================================================
+Sample: 2015-2023 (9 years, 125 municipalities, N×T = 1,125 obs).
+2024 is excluded because SIMAT coverage data has a one-year reporting lag.
+
+Run from repo root: python src/models/spatial_model_sdm.py
 """
 
+import logging
 import os
-import sys
 import pickle
 import warnings
-import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -46,7 +47,6 @@ import numpy as np
 import pandas as pd
 from scipy import stats as scipy_stats
 
-# Econometría espacial
 from spreg import PanelFE, Panel_FE_Lag, Panel_FE_Error
 from spreg.diagnostics_panel import (
     panel_LMlag, panel_LMerror,
@@ -57,162 +57,154 @@ from esda import Moran
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# ---------------------------------------------------------------------------
-# Configuración
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+# Configuration
+# -------------------------------------------------------------------------
+
 os.makedirs("logs", exist_ok=True)
 os.makedirs("results", exist_ok=True)
 
 logging.basicConfig(
     filename=f"logs/spatial_model_{datetime.today().strftime('%Y%m%d')}.log",
     level=logging.INFO,
-    format="%(asctime)s — %(levelname)s — %(message)s"
+    format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
 GOLD_PATH    = Path("data/gold")
 RESULTS_PATH = Path("results")
 
-# Variables del modelo — definición explícita
 DEP_VAR  = "ln_va_per_capita"
 COVARS   = ["tasa_homicidios", "cobertura_secundaria"]
 ID_VAR   = "cod_mpio"
 TIME_VAR = "year"
-# Período de análisis: 2015-2023 (cobertura_secundaria disponible)
+
+# 2024 excluded: SIMAT coverage not yet available
 T_START, T_END = 2015, 2023
 
 SEP = "=" * 72
 
 
 # ===========================================================================
-# SECCIÓN 1 — CARGA Y PREPARACIÓN DE DATOS
+# Section 1 — Load data
 # ===========================================================================
 
 def load_data():
-    """Carga el panel Gold y la matriz W Queen preconstruida."""
+    """Load the Gold panel and the pre-built Queen W matrix."""
     print(f"\n{SEP}")
-    print("  SECCIÓN 1 — CARGA DE DATOS")
+    print("  SECTION 1 — DATA LOADING")
     print(SEP)
 
-    # Panel
     panel_file = GOLD_PATH / "panel_gold.parquet"
     if not panel_file.exists():
-        raise FileNotFoundError(f"Ejecuta 03_gold_panel.py primero: {panel_file}")
+        raise FileNotFoundError(f"[ERROR] Run 03_gold_panel.py first: {panel_file}")
+
     df = pd.read_parquet(panel_file)
-
-    # Filtrar período con cobertura completa
     df = df[df[TIME_VAR].between(T_START, T_END)].copy()
-    print(f"\n  Panel: {T_START}-{T_END}, {df[ID_VAR].nunique()} municipios")
-    print(f"  Observaciones: {len(df)}")
 
-    # Eliminar NaN en variables del modelo
+    print(f"\n  Panel: {T_START}-{T_END}, {df[ID_VAR].nunique()} municipalities")
+    print(f"  Observations: {len(df)}")
+
+    # Drop rows with missing model variables
     cols_needed = [ID_VAR, TIME_VAR, DEP_VAR] + COVARS
-    n_antes = len(df)
+    n_before = len(df)
     df = df[cols_needed].dropna()
-    n_despues = len(df)
-    if n_antes > n_despues:
-        print(f"  ⚠️  Eliminadas {n_antes - n_despues} obs con NaN")
+    if n_before > len(df):
+        print(f"  [WARNING] Dropped {n_before - len(df)} rows with NaN in model variables")
 
-    # Verificar balance
-    n_mpios  = df[ID_VAR].nunique()
-    n_years  = df[TIME_VAR].nunique()
-    n_obs    = len(df)
-    balanceado = n_obs == n_mpios * n_years
-    print(f"  Balance: {n_mpios} mpios × {n_years} años = {n_mpios*n_years} obs esperadas")
-    print(f"  Estado:  {'✅ BALANCEADO' if balanceado else '⚠️  DESBALANCEADO'}")
+    # Panel balance check
+    n_mpios    = df[ID_VAR].nunique()
+    n_years    = df[TIME_VAR].nunique()
+    n_obs      = len(df)
+    balanced   = n_obs == n_mpios * n_years
+    print(f"\n  Balance: {n_mpios} mpios × {n_years} years = {n_mpios * n_years} expected")
+    print(f"  Status : {'BALANCED' if balanced else 'UNBALANCED'}")
 
-    # Ordenar: spreg Panel requiere orden por período-municipio o municipio-período
-    # Panel_FE_Lag está escrito para datos ordenados: todos los t de mpio1, luego mpio2...
+    # spreg Panel expects data ordered by [ID, TIME] — municipality varies slowly
     df = df.sort_values([ID_VAR, TIME_VAR]).reset_index(drop=True)
 
-    # Matriz W (Queen contigüidad real del shapefile)
+    # Load W
     w_file = GOLD_PATH / "W_queen.pkl"
     if not w_file.exists():
         raise FileNotFoundError(
-            f"Ejecuta src/models/build_W_queen.py primero: {w_file}"
+            f"[ERROR] Run src/models/build_W_queen.py first: {w_file}"
         )
     with open(w_file, "rb") as f:
         w = pickle.load(f)
 
-    # Alinear W con los municipios en el panel (subconjunto si hay diferencias)
+    # Align W with panel (subset if necessary)
     mpios_panel = sorted(df[ID_VAR].unique().tolist())
     mpios_w     = sorted(w.neighbors.keys())
-    en_w_no_panel = set(mpios_w) - set(mpios_panel)
-    en_panel_no_w = set(mpios_panel) - set(mpios_w)
 
-    if en_panel_no_w:
-        print(f"\n  ⚠️  Municipios del panel sin geometría en W: {en_panel_no_w}")
-        df = df[~df[ID_VAR].isin(en_panel_no_w)]
+    missing_in_w = set(mpios_panel) - set(mpios_w)
+    extra_in_w   = set(mpios_w) - set(mpios_panel)
+
+    if missing_in_w:
+        print(f"\n  [WARNING] Panel municipalities not in W: {missing_in_w}")
+        df = df[~df[ID_VAR].isin(missing_in_w)]
         mpios_panel = sorted(df[ID_VAR].unique().tolist())
 
     from libpysal.weights import w_subset
-    if en_w_no_panel:
+    if extra_in_w:
         w = w_subset(w, mpios_panel)
         w.transform = "r"
 
-    print(f"\n  W Queen cargada: {w.n} municipios, vecinos promedio: "
+    print(f"\n  W loaded: {w.n} nodes, avg neighbors: "
           f"{np.mean(list(w.cardinalities.values())):.1f}")
 
-    logger.info(f"Datos cargados: {df.shape}, W: {w.n} nodos")
+    logger.info(f"Data loaded: {df.shape}, W: {w.n} nodes")
     return df, w
 
 
 # ===========================================================================
-# SECCIÓN 2 — PREPARAR VECTORES PARA SPREG PANEL
+# Section 2 — Prepare vectors for spreg
 # ===========================================================================
 
 def prepare_vectors(df, w):
     """
-    spreg.Panel_FE_Lag / Panel_FE_Error esperan:
-      y : array (N*T, 1) — ordenado por [ID, TIME]  → municipio varía más lento
-      x : array (N*T, k) — mismas filas que y, SIN constante (el estimador FE la elimina)
-      w : objeto W de libpysal con N nodos (N = número de municipios, no N*T)
-
-    La ordenación correcta es: todos los t de mpio1, luego todos los t de mpio2, etc.
+    spreg panel estimators expect:
+      y : (N*T, 1) array ordered [ID, TIME] — municipality varies slowly
+      x : (N*T, k) array — no intercept column (FE estimator demeans internally)
+      w : libpysal W object with N nodes (not N*T)
     """
-    # Re-ordenar por municipio y luego tiempo
     df = df.sort_values([ID_VAR, TIME_VAR]).reset_index(drop=True)
 
-    # Verificar que el W tiene exactamente los mismos IDs que el panel
     mpios_panel = sorted(df[ID_VAR].unique().tolist())
     mpios_w     = sorted(w.neighbors.keys())
     assert mpios_panel == mpios_w, (
-        "IDs del panel y la matriz W no coinciden. "
-        "Verifica build_W_queen.py y el panel Gold."
+        "Panel and W municipality IDs do not match. "
+        "Re-run build_W_queen.py and 03_gold_panel.py."
     )
 
     y = df[DEP_VAR].values.reshape(-1, 1)
-    X = df[COVARS].values   # Sin constante — Panel_FE la elimina internamente
+    X = df[COVARS].values   # no constant — Panel_FE removes it via demeaning
 
     n_mpios = df[ID_VAR].nunique()
     n_years = df[TIME_VAR].nunique()
     n_obs   = len(df)
-    print(f"\n  Vectores preparados: y = ({n_obs},1), X = ({n_obs},{len(COVARS)})")
-    print(f"  N municipios = {n_mpios}, T períodos = {n_years}")
+
+    print(f"\n  Vectors: y = ({n_obs}, 1), X = ({n_obs}, {len(COVARS)})")
+    print(f"  N = {n_mpios} municipalities, T = {n_years} periods")
 
     return y, X, df, n_mpios, n_years
 
 
 # ===========================================================================
-# SECCIÓN 3 — OLS CON EFECTOS FIJOS (WITHIN-ESTIMATOR)
+# Section 3 — Panel OLS with fixed effects
 # ===========================================================================
 
 def ols_panel_fe(y, X, w, df, n_mpios, n_years):
     """
-    Panel OLS con efectos fijos municipales (within-estimator).
-    PanelFE de spreg implementa el demeaning interno.
+    Within-estimator: demeans y and X by municipality to remove the fixed effect.
+    This controls for all time-invariant unobserved heterogeneity
+    (geography, historical endowments, institutions) without modelling it directly.
+
+    Specification:
+      ln_va_per_capita_it = alpha_i + beta1*tasa_homicidios_it + beta2*cobertura_secundaria_it + eps_it
     """
     print(f"\n{SEP}")
-    print("  SECCIÓN 3 — PANEL OLS CON EFECTOS FIJOS (WITHIN)")
+    print("  SECTION 3 — PANEL OLS WITH FIXED EFFECTS (WITHIN)")
     print(SEP)
-    print("""
-  Especificación:
-    ln_va_per_capita_it = α_i + β₁·tasa_homicidios_it + β₂·cobertura_secundaria_it + ε_it
-
-  α_i capta heterogeneidad municipal invariante en el tiempo (geografía,
-  dotación histórica de capital, instituciones). El within-estimator elimina
-  este sesgo por omisión de variables no observadas constantes.
-""")
 
     ols_fe = PanelFE(
         y, X, w,
@@ -221,16 +213,15 @@ def ols_panel_fe(y, X, w, df, n_mpios, n_years):
         name_ds="Antioquia 2015-2023"
     )
 
-    print(f"  Pseudo-R² : {ols_fe.pr2:.4f}")
+    print(f"\n  Pseudo-R² : {ols_fe.pr2:.4f}")
     print(f"  Log-Lik   : {ols_fe.logll:.4f}")
-    print(f"\n  {'Variable':<25} {'Coef':>10} {'Std.Err':>10} {'t-stat':>10} {'p-valor':>10}")
-    print("  " + "-"*65)
+    print(f"\n  {'Variable':<25} {'Coef':>10} {'Std.Err':>10} {'t-stat':>10} {'p-value':>10}")
+    print("  " + "-" * 65)
 
-    names = COVARS
-    for i, var in enumerate(names):
+    for i, var in enumerate(COVARS):
         coef  = ols_fe.betas[i, 0]
         se    = ols_fe.std_err[i]
-        tstat = ols_fe.z_stat[i][0]   # PanelFE guarda los t-stats en z_stat
+        tstat = ols_fe.z_stat[i][0]
         pval  = ols_fe.z_stat[i][1]
         stars = "***" if pval < 0.01 else ("**" if pval < 0.05 else ("*" if pval < 0.1 else ""))
         print(f"  {var:<25} {coef:>10.4f} {se:>10.4f} {tstat:>10.3f} {pval:>10.4f} {stars}")
@@ -240,155 +231,143 @@ def ols_panel_fe(y, X, w, df, n_mpios, n_years):
 
 
 # ===========================================================================
-# SECCIÓN 4 — MORAN'S I SOBRE RESIDUOS + TESTS LM DE PANEL
+# Section 4 — Spatial diagnostics: Moran's I + LM tests
 # ===========================================================================
 
 def spatial_diagnostics(ols_fe, y, X, w, df):
     """
-    Diagnósticos de dependencia espacial sobre el OLS con FE.
+    Two complementary checks for spatial dependence in the OLS residuals:
 
-    Moran's I sobre residuos: detecta si la dependencia espacial persiste
-    después de controlar por los efectos fijos.
+    Moran's I (cross-sectional, municipality means): a quick visual/descriptive
+    check — statistically positive I after FE suggests spatial structure remains.
 
-    Tests LM (Elhorst 2014):
-      LM-Lag   ~ chi²(1):  H₀ = ρ=0 vs H₁ = modelo SAR
-      LM-Error ~ chi²(1):  H₀ = λ=0 vs H₁ = modelo SEM
-      RLM-Lag  y RLM-Error: versiones robustas (controlan por el otro)
+    LM tests (Elhorst 2014): formal panel-adapted tests that distinguish
+    between spatial lag dependence (SAR, rho != 0) and error dependence
+    (SEM, lambda != 0). The robust versions (RLM) control for the other
+    alternative, so they are used for the actual model selection decision.
     """
     print(f"\n{SEP}")
-    print("  SECCIÓN 4 — DIAGNÓSTICOS ESPACIALES")
+    print("  SECTION 4 — SPATIAL DIAGNOSTICS")
     print(SEP)
 
-    # residuos del within (PanelFE usa .u)
-
-    # --- Moran's I sobre residuos (promediado por municipio para cross-section) ---
-    print("\n  4a. Moran's I sobre residuos OLS-FE (promediados por municipio)\n")
+    # -- Moran's I on municipality-averaged residuals --
+    print("\n  4a. Moran's I on OLS-FE residuals (averaged by municipality)\n")
 
     df_temp = df.copy()
-    df_temp["residuo"] = ols_fe.u.flatten()   # 'u' = residuos en PanelFE
-    res_cs = df_temp.groupby(ID_VAR)["residuo"].mean()
-    # Alinear con el orden de la W
+    df_temp["residual"] = ols_fe.u.flatten()
+    res_cs = df_temp.groupby(ID_VAR)["residual"].mean()
     res_cs = res_cs.reindex(sorted(w.neighbors.keys()))
 
     moran_res = Moran(res_cs.values, w)
-    sig_res = "***" if moran_res.p_sim < 0.01 else (
-              "**"  if moran_res.p_sim < 0.05 else (
-              "*"   if moran_res.p_sim < 0.10 else "ns"))
+    sig_res = ("***" if moran_res.p_sim < 0.01 else
+               ("**" if moran_res.p_sim < 0.05 else
+                ("*"  if moran_res.p_sim < 0.10 else "ns")))
 
-    print(f"  I de Moran (residuos): {moran_res.I:.4f}")
-    print(f"  Z-score             : {moran_res.z_sim:.3f}")
-    print(f"  P-valor (simulado)  : {moran_res.p_sim:.4f}  {sig_res}")
+    print(f"  Moran's I  : {moran_res.I:.4f}")
+    print(f"  Z-score    : {moran_res.z_sim:.3f}")
+    print(f"  P-value    : {moran_res.p_sim:.4f}  {sig_res}")
 
     if moran_res.p_sim < 0.05:
-        print("\n  → Dependencia espacial en residuos: justifica modelo espacial.")
+        print("\n  -> Spatial dependence detected in residuals; a spatial model is warranted.")
     else:
-        print("\n  → Sin dependencia espacial clara en residuos. El OLS-FE puede bastar.")
+        print("\n  -> No clear spatial dependence in residuals. Panel OLS-FE may suffice.")
 
-    # --- Tests LM de panel ---
-    print("\n  4b. Tests LM de panel espacial (Anselin 1988; Elhorst 2014)\n")
-    print(f"  {'Test':<18} {'Estadístico':>14} {'p-valor':>10} {'Decisión':>20}")
-    print("  " + "-"*66)
+    # -- LM panel tests --
+    print("\n  4b. LM panel spatial tests (Anselin 1988; Elhorst 2014)\n")
+    print(f"  {'Test':<18} {'Statistic':>14} {'p-value':>10} {'Sig':>10}")
+    print("  " + "-" * 56)
 
-    resultados_lm = {}
-
-    for nombre, fn in [("LM-Lag", panel_LMlag), ("LM-Error", panel_LMerror),
-                       ("RLM-Lag", panel_rLMlag), ("RLM-Error", panel_rLMerror)]:
+    results_lm = {}
+    for name, fn in [("LM-Lag",   panel_LMlag),   ("LM-Error", panel_LMerror),
+                     ("RLM-Lag",  panel_rLMlag),  ("RLM-Error", panel_rLMerror)]:
         try:
             stat, pval = fn(y, X, w)
-            sig = "***" if pval < 0.01 else ("**" if pval < 0.05 else ("*" if pval < 0.1 else "ns"))
-            significativo = pval < 0.05
-            resultados_lm[nombre] = {"stat": stat, "pval": pval, "sig": sig, "sign": significativo}
-            print(f"  {nombre:<18} {stat:>14.4f} {pval:>10.4f} {sig:>20}")
+            sig = ("***" if pval < 0.01 else ("**" if pval < 0.05 else ("*" if pval < 0.1 else "ns")))
+            results_lm[name] = {"stat": stat, "pval": pval, "sig": sig, "sign": pval < 0.05}
+            print(f"  {name:<18} {stat:>14.4f} {pval:>10.4f} {sig:>10}")
         except Exception as e:
-            resultados_lm[nombre] = {"stat": np.nan, "pval": np.nan, "sig": "ERR", "sign": False}
-            print(f"  {nombre:<18} {'ERROR':>14} — {str(e)[:30]}")
+            results_lm[name] = {"stat": np.nan, "pval": np.nan, "sig": "ERR", "sign": False}
+            print(f"  {name:<18} {'ERROR':>14}   {str(e)[:30]}")
 
-    print("  " + "-"*66)
-    print("  Significancia: *** p<0.01, ** p<0.05, * p<0.1, ns = no significativo")
+    print("  " + "-" * 56)
+    print("  Significance: *** p<0.01, ** p<0.05, * p<0.1, ns = not significant")
 
-    logger.info(f"LM tests: {resultados_lm}")
-    return moran_res, resultados_lm
+    logger.info(f"LM tests: {results_lm}")
+    return moran_res, results_lm
 
 
 # ===========================================================================
-# SECCIÓN 5 — REGLA DE DECISIÓN Y SELECCIÓN DE MODELO
+# Section 5 — Model selection
 # ===========================================================================
 
-def select_model(moran_res, resultados_lm):
+def select_model(moran_res, results_lm):
     """
-    Regla de decisión estándar (Anselin 1988):
+    Standard decision rule (Anselin 1988; Florax et al. 2003).
+    Robust LM statistics take priority over unadjusted ones because they
+    control for the alternative form of spatial dependence.
 
-    1. Si RLM-Lag significativo y RLM-Error no → SAR (Panel_FE_Lag)
-    2. Si RLM-Error significativo y RLM-Lag no → SEM (Panel_FE_Error)
-    3. Si ambos significativos → el de mayor estadístico
-    4. Si ninguno significativo → Panel OLS FE (sin componente espacial)
-
-    Se prioriza la versión robusta (RLM) sobre la no robusta (LM).
+    1. RLM-Lag sig, RLM-Error not   -> SAR (Panel_FE_Lag)
+    2. RLM-Error sig, RLM-Lag not   -> SEM (Panel_FE_Error)
+    3. Both significant              -> pick the larger statistic
+    4. Neither significant           -> Panel OLS FE is sufficient
     """
     print(f"\n{SEP}")
-    print("  SECCIÓN 5 — SELECCIÓN DE MODELO")
+    print("  SECTION 5 — MODEL SELECTION")
     print(SEP)
 
-    rlm_lag   = resultados_lm.get("RLM-Lag",   {"stat": 0, "pval": 1, "sign": False})
-    rlm_error = resultados_lm.get("RLM-Error", {"stat": 0, "pval": 1, "sign": False})
-    lm_lag    = resultados_lm.get("LM-Lag",    {"stat": 0, "pval": 1, "sign": False})
-    lm_error  = resultados_lm.get("LM-Error",  {"stat": 0, "pval": 1, "sign": False})
-
-    moran_sig = moran_res.p_sim < 0.10   # criterio laxo para el Moran
+    rlm_lag   = results_lm.get("RLM-Lag",   {"stat": 0, "pval": 1, "sign": False})
+    rlm_error = results_lm.get("RLM-Error", {"stat": 0, "pval": 1, "sign": False})
 
     if not rlm_lag["sign"] and not rlm_error["sign"]:
         decision = "OLS_FE"
-        razon = ("Ni RLM-Lag ni RLM-Error son significativos al 5%.\n"
-                 "  El panel OLS con efectos fijos es suficiente.\n"
-                 "  No hay evidencia de dependencia espacial después de controlar por FE.")
+        reason   = ("Neither RLM-Lag nor RLM-Error is significant at 5%.\n"
+                    "  Panel OLS with fixed effects is sufficient;\n"
+                    "  no evidence of spatial dependence beyond the FE.")
     elif rlm_lag["sign"] and not rlm_error["sign"]:
         decision = "SAR"
-        razon = ("RLM-Lag significativo, RLM-Error no → modelo SAR (Panel_FE_Lag).\n"
-                 "  Hay spillovers en los niveles de VA per cápita entre vecinos.")
+        reason   = ("RLM-Lag significant, RLM-Error not -> SAR (Panel_FE_Lag).\n"
+                    "  VA per capita spillovers across neighboring municipalities.")
     elif rlm_error["sign"] and not rlm_lag["sign"]:
         decision = "SEM"
-        razon = ("RLM-Error significativo, RLM-Lag no → modelo SEM (Panel_FE_Error).\n"
-                 "  Dependencia espacial en los errores (shocks o variables omitidas comunes).")
+        reason   = ("RLM-Error significant, RLM-Lag not -> SEM (Panel_FE_Error).\n"
+                    "  Spatial dependence in errors: unobserved common shocks across neighbors.")
     else:
-        # Ambos significativos → elegir el de mayor estadístico robusto
         if rlm_lag["stat"] >= rlm_error["stat"]:
             decision = "SAR"
-            razon = ("Ambos RLM significativos. RLM-Lag > RLM-Error → SAR.\n"
-                     f"  RLM-Lag={rlm_lag['stat']:.3f}, RLM-Error={rlm_error['stat']:.3f}")
+            reason   = (f"Both RLM significant; RLM-Lag ({rlm_lag['stat']:.3f}) "
+                        f"> RLM-Error ({rlm_error['stat']:.3f}) -> SAR.")
         else:
             decision = "SEM"
-            razon = ("Ambos RLM significativos. RLM-Error > RLM-Lag → SEM.\n"
-                     f"  RLM-Error={rlm_error['stat']:.3f}, RLM-Lag={rlm_lag['stat']:.3f}")
+            reason   = (f"Both RLM significant; RLM-Error ({rlm_error['stat']:.3f}) "
+                        f"> RLM-Lag ({rlm_lag['stat']:.3f}) -> SEM.")
 
-    print(f"\n  Modelo seleccionado: {decision}")
-    print(f"  Razón: {razon}")
-    logger.info(f"Modelo seleccionado: {decision}")
+    print(f"\n  Selected model : {decision}")
+    print(f"  Reason         : {reason}")
+    logger.info(f"Model selected: {decision}")
     return decision
 
 
 # ===========================================================================
-# SECCIÓN 6 — ESTIMACIÓN DEL MODELO SELECCIONADO
+# Section 6 — Estimate the selected model
 # ===========================================================================
 
 def estimate_model(decision, y, X, w, df):
-    """Estima el modelo elegido por la secuencia diagnóstica."""
+    """Estimate whichever model the diagnostic sequence selected."""
     print(f"\n{SEP}")
-    print(f"  SECCIÓN 6 — ESTIMACIÓN: {decision}")
+    print(f"  SECTION 6 — ESTIMATION: {decision}")
     print(SEP)
 
     if decision == "OLS_FE":
-        print("\n  El OLS con efectos fijos ya fue estimado (Sección 3).")
-        print("  No se estima modelo espacial adicional.")
+        print("\n  OLS-FE was estimated in Section 3. No spatial model needed.")
         return None
 
     elif decision == "SAR":
         print("""
-  Modelo SAR con efectos fijos municipales:
-    ln_va_per_capita_it = ρ·W·ln_va_per_capita_it + β'Xit + α_i + ε_it
+  SAR with municipal fixed effects:
+    ln_va_per_capita_it = rho * W * ln_va_per_capita_it + beta' * X_it + alpha_i + eps_it
 
-  ρ = coeficiente de interdependencia espacial ('spillover' de VA per cápita).
-  Si ρ>0 y significativo: el VA per cápita de un municipio depende positivamente
-  del VA per cápita promedio de sus vecinos geográficos.
+  rho > 0 and significant: VA per capita in a municipality is positively
+  correlated with the average VA per capita of its geographic neighbors.
 """)
         modelo = Panel_FE_Lag(
             y, X, w,
@@ -396,17 +375,17 @@ def estimate_model(decision, y, X, w, df):
             name_x=COVARS,
             name_ds="Antioquia 2015-2023"
         )
-        param_espacial = ("rho", modelo.rho)
+        param_name  = "rho"
+        param_value = modelo.rho
 
     elif decision == "SEM":
         print("""
-  Modelo SEM con efectos fijos municipales:
-    ln_va_per_capita_it = β'Xit + α_i + u_it
-    u_it = λ·W·u_it + ε_it
+  SEM with municipal fixed effects:
+    ln_va_per_capita_it = beta' * X_it + alpha_i + u_it
+    u_it = lambda * W * u_it + eps_it
 
-  λ = coeficiente de dependencia espacial en los errores.
-  Si λ>0 y significativo: los shocks no observados se propagan entre vecinos
-  (ej. shocks climáticos, derrames de política, precios de materias primas).
+  lambda > 0 and significant: unobserved shocks propagate across neighbors
+  (e.g., climate events, commodity price cycles, regional policy spillovers).
 """)
         modelo = Panel_FE_Error(
             y, X, w,
@@ -414,131 +393,124 @@ def estimate_model(decision, y, X, w, df):
             name_x=COVARS,
             name_ds="Antioquia 2015-2023"
         )
-        param_espacial = ("lambda", modelo.lam)
+        param_name  = "lambda"
+        param_value = modelo.lam
 
-    # --- Resultados ---
-    param_nombre, param_valor = param_espacial
-    print(f"\n  {'Variable':<25} {'Coef':>10} {'Std.Err':>10} {'z-stat':>10} {'p-valor':>10}")
-    print("  " + "-"*65)
+    # -- Results table --
+    print(f"\n  {'Variable':<25} {'Coef':>10} {'Std.Err':>10} {'z-stat':>10} {'p-value':>10}")
+    print("  " + "-" * 65)
 
     for i, var in enumerate(COVARS):
-        coef = modelo.betas[i, 0]
-        se   = modelo.std_err[i]
-        zval = modelo.z_stat[i][0]
-        pval = modelo.z_stat[i][1]
+        coef  = modelo.betas[i, 0]
+        se    = modelo.std_err[i]
+        zval  = modelo.z_stat[i][0]
+        pval  = modelo.z_stat[i][1]
         stars = "***" if pval < 0.01 else ("**" if pval < 0.05 else ("*" if pval < 0.1 else ""))
         print(f"  {var:<25} {coef:>10.4f} {se:>10.4f} {zval:>10.3f} {pval:>10.4f} {stars}")
 
-    # Parámetro espacial
-    idx_sp = len(COVARS)  # último parámetro
+    idx_sp = len(COVARS)
     sp_se  = modelo.std_err[idx_sp] if len(modelo.std_err) > idx_sp else np.nan
     sp_z   = modelo.z_stat[idx_sp][0] if len(modelo.z_stat) > idx_sp else np.nan
     sp_p   = modelo.z_stat[idx_sp][1] if len(modelo.z_stat) > idx_sp else np.nan
     sp_stars = "***" if sp_p < 0.01 else ("**" if sp_p < 0.05 else ("*" if sp_p < 0.1 else ""))
 
-    print("  " + "-"*65)
-    print(f"  {param_nombre:<25} {param_valor:>10.4f} {sp_se:>10.4f} {sp_z:>10.3f} {sp_p:>10.4f} {sp_stars}")
+    print("  " + "-" * 65)
+    print(f"  {param_name:<25} {param_value:>10.4f} {sp_se:>10.4f} {sp_z:>10.3f} {sp_p:>10.4f} {sp_stars}")
 
     print(f"\n  Log-Likelihood : {modelo.logll:.4f}")
     print(f"  AIC            : {modelo.aic:.4f}")
 
-    logger.info(f"{decision}: {param_nombre}={param_valor:.4f}, LL={modelo.logll:.4f}")
+    logger.info(f"{decision}: {param_name}={param_value:.4f}, LL={modelo.logll:.4f}")
     return modelo
 
 
 # ===========================================================================
-# SECCIÓN 7 — GUARDAR RESULTADOS
+# Section 7 — Save results
 # ===========================================================================
 
-def save_results(decision, ols_fe, modelo_espacial, moran_res, resultados_lm, df):
-    """Guarda tablas de resultados en results/."""
+def save_results(decision, ols_fe, modelo_espacial, moran_res, results_lm, df):
+    """Write coefficient tables and diagnostic statistics to results/."""
     ts = datetime.now().strftime("%Y%m%d_%H%M")
-
-    # --- Tabla de coeficientes ---
     rows = []
 
-    # OLS FE
     for i, var in enumerate(COVARS):
-        coef = ols_fe.betas[i, 0]
-        se   = ols_fe.std_err[i]
-        rows.append({"modelo": "OLS_FE", "variable": var,
-                     "coef": round(coef, 5), "std_err": round(se, 5)})
+        rows.append({
+            "model"   : "OLS_FE",
+            "variable": var,
+            "coef"    : round(ols_fe.betas[i, 0], 5),
+            "std_err" : round(ols_fe.std_err[i], 5)
+        })
 
-    # Modelo espacial (si aplica)
     if modelo_espacial is not None:
         for i, var in enumerate(COVARS):
-            coef = modelo_espacial.betas[i, 0]
-            se   = modelo_espacial.std_err[i]
-            rows.append({"modelo": decision, "variable": var,
-                         "coef": round(coef, 5), "std_err": round(se, 5)})
-        param_nombre = "rho" if decision == "SAR" else "lambda"
-        param_val    = modelo_espacial.rho if decision == "SAR" else modelo_espacial.lam
-        idx_sp = len(COVARS)
-        sp_se  = modelo_espacial.std_err[idx_sp] if len(modelo_espacial.std_err) > idx_sp else np.nan
-        rows.append({"modelo": decision, "variable": param_nombre,
-                     "coef": round(param_val, 5), "std_err": round(sp_se, 5)})
+            rows.append({
+                "model"   : decision,
+                "variable": var,
+                "coef"    : round(modelo_espacial.betas[i, 0], 5),
+                "std_err" : round(modelo_espacial.std_err[i], 5)
+            })
+        param_name = "rho" if decision == "SAR" else "lambda"
+        param_val  = modelo_espacial.rho if decision == "SAR" else modelo_espacial.lam
+        idx_sp     = len(COVARS)
+        sp_se      = (modelo_espacial.std_err[idx_sp]
+                      if len(modelo_espacial.std_err) > idx_sp else np.nan)
+        rows.append({
+            "model"   : decision,
+            "variable": param_name,
+            "coef"    : round(param_val, 5),
+            "std_err" : round(sp_se, 5)
+        })
 
-    coef_df = pd.DataFrame(rows)
-    coef_file = RESULTS_PATH / f"coeficientes_{ts}.csv"
+    coef_df   = pd.DataFrame(rows)
+    coef_file = RESULTS_PATH / f"coefficients_{ts}.csv"
     coef_df.to_csv(coef_file, index=False)
 
-    # --- Tabla de diagnósticos ---
-    diag_rows = [
-        {"prueba": "Moran_I_residuos", "estadistico": round(moran_res.I, 4),
-         "pvalor": round(moran_res.p_sim, 4)}
-    ]
-    for nombre, res in resultados_lm.items():
+    diag_rows = [{
+        "test"     : "Moran_I_residuals",
+        "statistic": round(moran_res.I, 4),
+        "pvalue"   : round(moran_res.p_sim, 4)
+    }]
+    for name, res in results_lm.items():
         if not np.isnan(res["stat"]):
-            diag_rows.append({"prueba": nombre,
-                               "estadistico": round(res["stat"], 4),
-                               "pvalor": round(res["pval"], 4)})
-    diag_df = pd.DataFrame(diag_rows)
-    diag_file = RESULTS_PATH / f"diagnosticos_{ts}.csv"
+            diag_rows.append({
+                "test"     : name,
+                "statistic": round(res["stat"], 4),
+                "pvalue"   : round(res["pval"], 4)
+            })
+    diag_df   = pd.DataFrame(diag_rows)
+    diag_file = RESULTS_PATH / f"diagnostics_{ts}.csv"
     diag_df.to_csv(diag_file, index=False)
 
-    print(f"\n  ✅ Guardados:")
+    print(f"\n  [SUCCESS] Saved:")
     print(f"     {coef_file}")
     print(f"     {diag_file}")
-    logger.info(f"Resultados en {RESULTS_PATH}")
+    logger.info(f"Results saved to {RESULTS_PATH}")
     return coef_df, diag_df
 
 
 # ===========================================================================
-# MAIN
+# Main
 # ===========================================================================
 
 def main():
     print(SEP)
-    print("  ECONOMETRÍA ESPACIAL DE PANEL — ANTIOQUIA 2015-2023")
-    print(f"  Dep. var: {DEP_VAR}")
-    print(f"  Regresores: {COVARS}")
+    print("  SPATIAL PANEL ECONOMETRICS — ANTIOQUIA 2015-2023")
+    print(f"  Dep. var.  : {DEP_VAR}")
+    print(f"  Regressors : {COVARS}")
     print(SEP)
 
-    # 1. Datos y W
     df, w = load_data()
-
-    # 2. Vectores
     y, X, df, n_mpios, n_years = prepare_vectors(df, w)
-
-    # 3. OLS FE
     ols_fe = ols_panel_fe(y, X, w, df, n_mpios, n_years)
-
-    # 4. Diagnósticos espaciales
-    moran_res, resultados_lm = spatial_diagnostics(ols_fe, y, X, w, df)
-
-    # 5. Selección de modelo
-    decision = select_model(moran_res, resultados_lm)
-
-    # 6. Estimación
+    moran_res, results_lm = spatial_diagnostics(ols_fe, y, X, w, df)
+    decision = select_model(moran_res, results_lm)
     modelo_espacial = estimate_model(decision, y, X, w, df)
-
-    # 7. Guardar
     coef_df, diag_df = save_results(
-        decision, ols_fe, modelo_espacial, moran_res, resultados_lm, df
+        decision, ols_fe, modelo_espacial, moran_res, results_lm, df
     )
 
     print(f"\n{SEP}")
-    print(f"  FIN — Modelo: {decision}")
+    print(f"  DONE — Selected model: {decision}")
     print(SEP)
     return ols_fe, modelo_espacial, decision
 
